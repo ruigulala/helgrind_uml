@@ -1,0 +1,38 @@
+--- linux-2.6.22.5-patched/kernel/rcupdate.c	2015-08-25 14:20:51.000000000 -0400
++++ linux-2.6.22.5-patched-changed/kernel/rcupdate.c	2015-08-25 14:41:08.000000000 -0400
+@@ -110,7 +110,7 @@
+ 	int j;
+ 	struct rcu_head const *const head0 = head;
+ 	char vbits[sizeof(*head)];
+-	for (; head; head= head->next) {
++	/*for (; head; head= head->next) {
+ 		int r = VALGRIND_GET_VBITS(head, &vbits, sizeof(vbits));
+ 		if (1!=r) {
+ 			VALGRIND_PRINTF("vg_check_rcu_head vbits=%d  addr=%p\n", r, head);
+@@ -118,7 +118,7 @@
+ 		else for (j=0; j < sizeof(vbits); ++j) if (0!=vbits[j]) {
+ 			VALGRIND_PRINTF("vg_check_rcu_head head0=%p  head=%p %d\n", head0, head, j);
+ 		}
+-	}
++	}*/
+ }
+
+ static void vg_check_vbits(void const *ptr, unsigned size)
+@@ -127,7 +127,7 @@
+ 	void const *const ptr0 = ptr;
+ 	unsigned const size0 = size;
+ 	unsigned char vbits[128];
+-	for (j=0; j < size; (ptr+= sizeof(vbits)), (j+=sizeof(vbits))) {
++	/*for (j=0; j < size; (ptr+= sizeof(vbits)), (j+=sizeof(vbits))) {
+ 		int k;
+ 		int const n = min_t(unsigned, sizeof(vbits), size - j);
+ 		VALGRIND_GET_VBITS(ptr, vbits, n);
+@@ -136,7 +136,7 @@
+ 				ptr0, size0, j, k);
+ 			for(;;);
+ 		}
+-	}
++	}*/
+ }
+
+ static void vg_bogey(struct rcu_head **tail)

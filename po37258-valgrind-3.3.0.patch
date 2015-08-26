@@ -1,0 +1,1510 @@
+diff -ur valgrind-3.3.0.old/README_DEVELOPERS valgrind-3.3.0.new/README_DEVELOPERS
+--- valgrind-3.3.0.old/README_DEVELOPERS	2007-12-10 15:18:47.000000000 -0800
++++ valgrind-3.3.0.new/README_DEVELOPERS	2007-12-14 14:43:40.000000000 -0800
+@@ -79,15 +79,32 @@
+ 
+       gdb /usr/local/lib/valgrind/ppc32-linux/lackey
+ 
+-    or
++    [Or, to specify a newly-built but uninstalled version:
++
++      export VALGRIND_LAUNCHER=$dir/coregrind/valgrind
++    ]
++
++(2) Run "gdb <prefix>/lib/valgrind/<platform>/<tool>":
+ 
+       gdb $DIR/.in_place/x86-linux/memcheck
+ 
++    [Or, to debug a newly-built but uninstalled version:
++
++      gdb $dir/.in_place/x86-linux/memcheck
++    ]
++
+ (3) Do "handle SIGSEGV SIGILL nostop noprint" in GDB to prevent GDB from
+     stopping on a SIGSEGV or SIGILL:
+ 
+     (gdb) handle SIGILL SIGSEGV nostop noprint
+ 
++    [Steps 1-3 may be combined in a  .gdbinit  file:
++        set env VALGRIND_LAUNCHER=$dir/coregrind/valgrind
++        file $dir/.in_place/x86-linux/memcheck
++        handle SIGILL SIGSEGV nostop noprint
++     However, .gdbinit requires that $dir be expanded to a literal string.
++    ]
++
+ (4) Set any breakpoints you want and proceed as normal for gdb. The
+     macro VG_(FUNC) is expanded to vgPlain_FUNC, so If you want to set
+     a breakpoint VG_(do_exec), you could do like this in GDB:
+diff -ur valgrind-3.3.0.old/include/valgrind.h valgrind-3.3.0.new/include/valgrind.h
+--- valgrind-3.3.0.old/include/valgrind.h	2007-12-10 15:18:25.000000000 -0800
++++ valgrind-3.3.0.new/include/valgrind.h	2007-12-15 11:13:18.000000000 -0800
+@@ -3625,7 +3625,9 @@
+           /* Stack support. */
+           VG_USERREQ__STACK_REGISTER   = 0x1501,
+           VG_USERREQ__STACK_DEREGISTER = 0x1502,
+-          VG_USERREQ__STACK_CHANGE     = 0x1503
++          VG_USERREQ__STACK_CHANGE     = 0x1503,
++          VG_USERREQ__STACK_SWITCH     = 0x1504,
++          VG_USERREQ__STACK_DEREGADDR  = 0x1505
+    } Vg_ClientRequest;
+ 
+ #if !defined(__GNUC__)
+@@ -3905,6 +3907,13 @@
+                                id, 0, 0, 0, 0);                   \
+    }
+ 
++#define VALGRIND_STACK_DEREGADDR(addr)                            \
++   {unsigned int _qzz_res;                                        \
++    VALGRIND_DO_CLIENT_REQUEST(_qzz_res, 0,                       \
++                               VG_USERREQ__STACK_DEREGADDR,       \
++                               addr, 0, 0, 0, 0);                 \
++   }
++
+ /* Change the start and end address of the stack id. */
+ #define VALGRIND_STACK_CHANGE(id, start, end)                     \
+    {unsigned int _qzz_res;                                        \
+@@ -3913,6 +3922,14 @@
+                                id, start, end, 0, 0);             \
+    }
+ 
++/* Notify that stack has changed. (For longjmp.) */
++#define VALGRIND_STACK_SWITCH(old_esp, new_esp)                   \
++   {unsigned int _qzz_res;                                        \
++    VALGRIND_DO_CLIENT_REQUEST(_qzz_res, 0,                       \
++                               VG_USERREQ__STACK_SWITCH,          \
++                               old_esp, new_esp, 0, 0, 0);        \
++   }
++
+ 
+ #undef PLAT_x86_linux
+ #undef PLAT_amd64_linux
+diff -ur valgrind-3.3.0.old/include/vki/vki-linux.h valgrind-3.3.0.new/include/vki/vki-linux.h
+--- valgrind-3.3.0.old/include/vki/vki-linux.h	2007-12-10 15:18:25.000000000 -0800
++++ valgrind-3.3.0.new/include/vki/vki-linux.h	2007-12-14 14:58:06.000000000 -0800
+@@ -318,6 +318,8 @@
+ #define VKI_CLONE_DETACHED	0x00400000	/* Unused, ignored */
+ #define VKI_CLONE_CHILD_SETTID	0x01000000	/* set the TID in the child */
+ 
++#define VKI_CLONE_CHILD_LETGO   0x80000000        /* do not track the child */
++
+ struct vki_sched_param {
+ 	int sched_priority;
+ };
+diff -ur valgrind-3.3.0.old/coregrind/m_scheduler/scheduler.c valgrind-3.3.0.new/coregrind/m_scheduler/scheduler.c
+--- valgrind-3.3.0.old/coregrind/m_scheduler/scheduler.c	2007-12-10 15:18:46.000000000 -0800
++++ valgrind-3.3.0.new/coregrind/m_scheduler/scheduler.c	2007-12-20 17:34:18.000000000 -0800
+@@ -1316,6 +1316,11 @@
+          SET_CLREQ_RETVAL( tid, sid );
+          break; }
+ 
++      case VG_USERREQ__STACK_DEREGADDR: {
++         VG_(deregaddr_stack)((Addr)arg[1]);
++         SET_CLREQ_RETVAL( tid, 0 );     /* return value is meaningless */
++      } break;
++
+       case VG_USERREQ__STACK_DEREGISTER: {
+          VG_(deregister_stack)(arg[1]);
+          SET_CLREQ_RETVAL( tid, 0 );     /* return value is meaningless */
+@@ -1326,6 +1331,13 @@
+          SET_CLREQ_RETVAL( tid, 0 );     /* return value is meaningless */
+          break; }
+ 
++      case VG_USERREQ__STACK_SWITCH: {
++         Addr hi = VG_(switch_stack)((Addr)arg[1], (Addr)arg[2]);
++         if (hi)
++            VG_(threads)[tid].client_stack_highest_word = hi;
++         SET_CLREQ_RETVAL( tid, 0 );     /* return value is meaningless */
++         break; }
++
+       case VG_USERREQ__GET_MALLOCFUNCS: {
+ 	 struct vg_mallocfunc_info *info = (struct vg_mallocfunc_info *)arg[1];
+ 
+diff -ur valgrind-3.3.0.old/coregrind/m_sigframe/sigframe-x86-linux.c valgrind-3.3.0.new/coregrind/m_sigframe/sigframe-x86-linux.c
+--- valgrind-3.3.0.old/coregrind/m_sigframe/sigframe-x86-linux.c	2007-12-10 15:18:41.000000000 -0800
++++ valgrind-3.3.0.new/coregrind/m_sigframe/sigframe-x86-linux.c	2007-12-15 11:15:54.000000000 -0800
+@@ -406,6 +406,7 @@
+    }
+ 
+    if (stackseg == NULL || !stackseg->hasR || !stackseg->hasW) {
++      VG_(am_show_nsegments)(2, "Can't extend stack");
+       VG_(message)(
+          Vg_UserMsg,
+          "Can't extend stack to %p during signal delivery for thread %d:",
+diff -ur valgrind-3.3.0.old/coregrind/m_signals.c valgrind-3.3.0.new/coregrind/m_signals.c
+--- valgrind-3.3.0.old/coregrind/m_signals.c	2007-12-10 15:18:47.000000000 -0800
++++ valgrind-3.3.0.new/coregrind/m_signals.c	2007-12-15 11:20:39.000000000 -0800
+@@ -973,6 +973,9 @@
+    VG_(sigfillset)(&block_procmask);
+    ret = VG_(sigprocmask)
+             (VKI_SIG_SETMASK, &block_procmask, saved_mask);
++   if (0!=ret) {
++      VG_(message)(Vg_DebugMsg, "block_all_host_signals ret=%d\n", ret);
++   }
+    vg_assert(ret == 0);
+ }
+ 
+@@ -1635,7 +1638,7 @@
+       = seg ? VG_(am_next_nsegment)( (NSegment*)seg, True/*fwds*/ )
+             : NULL;
+ 
+-   if (seg && seg->kind == SkAnonC)
++   if (seg && (seg->kind == SkAnonC || seg->kind == SkFileC))
+       /* addr is already mapped.  Nothing to do. */
+       return True;
+ 
+@@ -2114,6 +2117,28 @@
+       will set the appropriate mask at the appropriate time. */
+ }
+ 
++/* Revert to client signal state, in preparation to "let go" of a process.
++ * Called with all signals blocked.
++ */
++void VG_(sigletgo_actions) ( void )
++{
++   int i;
++   struct vki_sigaction sa;
++
++   for (i = 1; i <= _VKI_NSIG; i++) {
++      if (VG_SIGVGRTUSERMAX < i) {
++         VG_(sigaction)(i, VKI_SIG_DFL, NULL);
++      }
++      else if (VKI_SIGKILL!=i && VKI_SIGSTOP!=i) {
++         sa.ksa_handler = scss.scss_per_sig[i].scss_handler;
++         sa.sa_flags    = scss.scss_per_sig[i].scss_flags;
++         sa.sa_restorer = scss.scss_per_sig[i].scss_restorer;
++         sa.sa_mask     = scss.scss_per_sig[i].scss_mask;
++         VG_(sigaction)(i, &sa, NULL);
++      }
++   }
++}
++
+ /*--------------------------------------------------------------------*/
+ /*--- end                                                          ---*/
+ /*--------------------------------------------------------------------*/
+diff -ur valgrind-3.3.0.old/coregrind/m_stacks.c valgrind-3.3.0.new/coregrind/m_stacks.c
+--- valgrind-3.3.0.old/coregrind/m_stacks.c	2007-12-10 15:18:47.000000000 -0800
++++ valgrind-3.3.0.new/coregrind/m_stacks.c	2007-12-20 17:33:36.000000000 -0800
+@@ -90,6 +90,7 @@
+ 
+ static Stack *stacks;
+ static UWord next_id;  /* Next id we hand out to a newly registered stack */
++static UWord stack_threshhold = 625;  /* print when stack_threshhold <= id */
+ 
+ /*
+  * These are the id, start and end values of the current stack.  If the
+@@ -126,6 +127,13 @@
+       start = t;
+    }
+ 
++   {
++      Stack *const j = find_stack_by_addr(start);
++      if (j && j->start==start && j->end==end) {
++         return j->id;
++      }
++   }
++
+    i = (Stack *)VG_(arena_malloc)(VG_AR_CORE, sizeof(Stack));
+    i->start = start;
+    i->end = end;
+@@ -137,7 +145,8 @@
+       current_stack = i;
+    }
+ 
+-   VG_(debugLog)(2, "stacks", "register %p-%p as stack %lu\n",
++   if (stack_threshhold <= i->id)
++      VG_(debugLog)(2, "stacks", "register %p-%p as stack %lu\n",
+                     (void*)start, (void*)end, i->id);
+ 
+    return i->id;
+@@ -152,14 +161,16 @@
+    Stack *i = stacks;
+    Stack *prev = NULL;
+ 
+-   VG_(debugLog)(2, "stacks", "deregister stack %lu\n", id);
+-
+-   if (current_stack && current_stack->id == id) { 
++   if (current_stack && current_stack->id == id) {
+       current_stack = NULL;
+    }
+ 
+    while(i) {
+       if (i->id == id) {
++         if (stack_threshhold <= i->id)
++            VG_(debugLog)(2, "stacks", "deregister stack %lu  %p-%p\n",
++               id, (void *)i->start, (void *)i->end);
++
+          if(prev == NULL) {
+             stacks = i->next;
+          } else {
+@@ -171,6 +182,17 @@
+       prev = i;
+       i = i->next;
+    }
++
++}
++void VG_(deregaddr_stack)(Addr addr)  /* from VALGRIND_STACK_DEREGADDR */
++{
++   Stack *j = find_stack_by_addr(addr);
++   if (j) {
++      VG_(deregister_stack)(j->id);
++   }
++   else {
++      VG_(debugLog)(2, "stacks", "deregaddr_stack not found %p\n", (void *)addr);
++   }
+ }
+ 
+ /*
+@@ -195,6 +217,26 @@
+    }
+ }
+ 
++/* Switch stacks (longjmp, setcontext, etc., if modified to tell us.) */
++/* Return highest address in new stack. */
++Addr VG_(switch_stack)(Addr old_SP, Addr new_SP)
++{
++   Addr rv = 0;
++   Stack* const old_stack = find_stack_by_addr(old_SP);
++   Stack* const new_stack = find_stack_by_addr(new_SP);
++
++   current_stack = new_stack;
++   VG_(debugLog)(3, "stacks", "switch_stack 0x%lx ==> 0x%lx  (0x%lx)\n",
++      old_SP, new_SP, new_SP - old_SP);
++   if (NULL==new_stack) {
++      VG_(debugLog)(3, "stacks", "*** unknown stack above\n");
++   }
++   else {
++      rv = new_stack->end;
++   }
++   return rv;
++}
++
+ /* This function gets called if new_mem_stack and/or die_mem_stack are
+    tracked by the tool, and one of the specialised cases
+    (eg. new_mem_stack_4) isn't used in preference.  
+@@ -205,16 +247,26 @@
+    static Int moans = 3;
+    Word delta  = (Word)new_SP - (Word)old_SP;
+ 
++   if ((int)delta<-1000 || 1000<=delta) {
++      VG_(debugLog)(3, "stacks", "unknown_SP_update  old=0x%lx  new=0x%lx\n",
++         old_SP, new_SP);
++      //VG_(printf)("unknown_SP_update %d\n", delta);
++   }
+    /* Check if the stack pointer is still in the same stack as before. */
+    if (current_stack == NULL ||
+        new_SP < current_stack->start || new_SP > current_stack->end) {
+-      Stack* new_stack = find_stack_by_addr(new_SP);
+-      if (new_stack 
+-          && (current_stack == NULL || new_stack->id != current_stack->id)) { 
+-         /* The stack pointer is now in another stack.  Update the current
+-            stack information and return without doing anything else. */
++      Stack* const new_stack = find_stack_by_addr(new_SP);
++      if (new_stack && new_stack->id != current_stack->id) {
++         /* Remember the new stack. */
+          current_stack = new_stack;
+-         return;
++         if (old_SP < new_stack->start || old_SP > new_stack->end) {
++            /* The previous stack pointer is not in the new stack.
++               The user switched stacks, and we caught them in the act.
++               Do nothing. */
++            return;
++         }
++         /* Both old_SP and new_SP are in the new stack,
++            so continue processing ... */
+       }
+    }
+ 
+diff -ur valgrind-3.3.0.old/coregrind/m_syswrap/priv_syswrap-linux.h valgrind-3.3.0.new/coregrind/m_syswrap/priv_syswrap-linux.h
+--- valgrind-3.3.0.old/coregrind/m_syswrap/priv_syswrap-linux.h	2007-12-10 15:18:43.000000000 -0800
++++ valgrind-3.3.0.new/coregrind/m_syswrap/priv_syswrap-linux.h	2007-12-14 14:43:40.000000000 -0800
+@@ -38,7 +38,7 @@
+ extern Addr ML_(allocstack)            ( ThreadId tid );
+ extern void ML_(call_on_new_stack_0_1) ( Addr stack, Addr retaddr,
+ 			                 void (*f)(Word), Word arg1 );
+-extern SysRes ML_(do_fork_clone) ( ThreadId tid, UInt flags,
++extern SysRes ML_(do_fork_clone) ( ThreadId tid, UInt flags, Addr child_esp,
+                                    Int* parent_tidptr, Int* child_tidptr );
+ 
+ 
+diff -ur valgrind-3.3.0.old/coregrind/m_syswrap/syswrap-amd64-linux.c valgrind-3.3.0.new/coregrind/m_syswrap/syswrap-amd64-linux.c
+--- valgrind-3.3.0.old/coregrind/m_syswrap/syswrap-amd64-linux.c	2007-12-10 15:18:43.000000000 -0800
++++ valgrind-3.3.0.new/coregrind/m_syswrap/syswrap-amd64-linux.c	2007-12-14 14:43:40.000000000 -0800
+@@ -430,6 +430,7 @@
+       SET_STATUS_from_SysRes(
+          ML_(do_fork_clone)(tid,
+                        cloneflags,      /* flags */
++                       (Addr)ARG2,      /* child ESP */
+                        (Int *)ARG3,     /* parent_tidptr */
+                        (Int *)ARG4));   /* child_tidptr */
+       break;
+diff -ur valgrind-3.3.0.old/coregrind/m_syswrap/syswrap-linux.c valgrind-3.3.0.new/coregrind/m_syswrap/syswrap-linux.c
+--- valgrind-3.3.0.old/coregrind/m_syswrap/syswrap-linux.c	2007-12-10 15:18:43.000000000 -0800
++++ valgrind-3.3.0.new/coregrind/m_syswrap/syswrap-linux.c	2007-12-15 11:17:32.000000000 -0800
+@@ -297,16 +297,20 @@
+ 
+ 
+ /* Do a clone which is really a fork() */
+-SysRes ML_(do_fork_clone) ( ThreadId tid, UInt flags,
++SysRes ML_(do_fork_clone) ( ThreadId tid, UInt flags, Addr child_esp,
+                             Int* parent_tidptr, Int* child_tidptr )
+ {
++   ThreadState *const ctst = VG_(get_ThreadState)(tid);
++   unsigned const letgo = VKI_CLONE_CHILD_LETGO & flags;
+    vki_sigset_t fork_saved_mask;
+    vki_sigset_t mask;
+    SysRes       res;
+ 
+    if (flags & (VKI_CLONE_SETTLS | VKI_CLONE_FS | VKI_CLONE_VM 
+-                | VKI_CLONE_FILES | VKI_CLONE_VFORK))
++                /*| VKI_CLONE_FILES*/ | VKI_CLONE_VFORK)) {
++      VG_(message)(Vg_DebugMsg, "do_fork_clone EINVAL  flags=0x%x\n", flags);
+       return VG_(mk_SysRes_Error)( VKI_EINVAL );
++   }
+ 
+    /* Block all signals during fork, so that we can fix things up in
+       the child without being interrupted. */
+@@ -331,17 +335,19 @@
+ 
+    if (!res.isError && res.res == 0) {
+       /* child */
+-      VG_(do_atfork_child)(tid);
+-
+-      /* restore signal mask */
+-      VG_(sigprocmask)(VKI_SIG_SETMASK, &fork_saved_mask, NULL);
++      ctst->arch.vex.guest_EAX = 0;  /* child */
++      if (child_esp) {
++         ctst->arch.vex.guest_ESP = child_esp;
++      }
+ 
+-      /* If --child-silent-after-fork=yes was specified, set the
+-         logging file descriptor to an 'impossible' value.  This is
+-         noticed by send_bytes_to_logging_sink in m_libcprint.c, which
+-         duly stops writing any further logging output. */
+-      if (!VG_(logging_to_socket) && VG_(clo_child_silent_after_fork))
+-         VG_(clo_log_fd) = -1;
++      VG_(do_atfork_child)(tid);
++      if (!letgo) {
++         /* restore signal mask */
++         VG_(sigprocmask)(VKI_SIG_SETMASK, &fork_saved_mask, NULL);
++      }
++      else {
++         letgo_vex_x86_linux(&ctst->arch.vex, tid);
++      }
+    } 
+    else 
+    if (!res.isError && res.res > 0) {
+diff -ur valgrind-3.3.0.old/coregrind/m_syswrap/syswrap-ppc32-linux.c valgrind-3.3.0.new/coregrind/m_syswrap/syswrap-ppc32-linux.c
+--- valgrind-3.3.0.old/coregrind/m_syswrap/syswrap-ppc32-linux.c	2007-12-10 15:18:43.000000000 -0800
++++ valgrind-3.3.0.new/coregrind/m_syswrap/syswrap-ppc32-linux.c	2007-12-14 14:43:40.000000000 -0800
+@@ -1003,6 +1003,7 @@
+       SET_STATUS_from_SysRes(
+          ML_(do_fork_clone)(tid,
+                        cloneflags,      /* flags */
++                       (Addr)ARG2,      /* child SP */
+                        (Int *)ARG3,     /* parent_tidptr */
+                        (Int *)ARG5));   /* child_tidptr */
+       break;
+diff -ur valgrind-3.3.0.old/coregrind/m_syswrap/syswrap-ppc64-linux.c valgrind-3.3.0.new/coregrind/m_syswrap/syswrap-ppc64-linux.c
+--- valgrind-3.3.0.old/coregrind/m_syswrap/syswrap-ppc64-linux.c	2007-12-10 15:18:43.000000000 -0800
++++ valgrind-3.3.0.new/coregrind/m_syswrap/syswrap-ppc64-linux.c	2007-12-14 14:43:40.000000000 -0800
+@@ -981,6 +981,7 @@
+       SET_STATUS_from_SysRes(
+          ML_(do_fork_clone)(tid,
+                        cloneflags,      /* flags */
++                       (Addr)ARG2,      /* child SP */
+                        (Int *)ARG3,     /* parent_tidptr */
+                        (Int *)ARG5));   /* child_tidptr */
+       break;
+diff -ur valgrind-3.3.0.old/coregrind/m_syswrap/syswrap-x86-linux.c valgrind-3.3.0.new/coregrind/m_syswrap/syswrap-x86-linux.c
+--- valgrind-3.3.0.old/coregrind/m_syswrap/syswrap-x86-linux.c	2007-12-10 15:18:43.000000000 -0800
++++ valgrind-3.3.0.new/coregrind/m_syswrap/syswrap-x86-linux.c	2007-12-26 16:13:14.000000000 -0800
+@@ -60,7 +60,6 @@
+ #include "priv_syswrap-linux-variants.h" /* decls of linux variant wrappers */
+ #include "priv_syswrap-main.h"
+ 
+-
+ /* ---------------------------------------------------------------------
+    clone() handling
+    ------------------------------------------------------------------ */
+@@ -182,6 +181,158 @@
+ ".previous\n"
+ );
+ 
++extern int set_thread_area(struct vki_user_desc *);
++asm(
++".text\n"
++"set_thread_area: .globl set_thread_area\n"
++"	movl %ebx,%edx\n"  // save register
++"	movl 4(%esp),%ebx\n"
++"	movl $243,%eax\n"
++"	int $0x80\n"
++"	movl %edx,%ebx\n"  // restore register
++"	ret\n"
++);
++
++static SysRes sys_set_thread_area ( ThreadId, vki_modify_ldt_t* );  // forward
++static void translate_to_hw_format ( /* IN  */ vki_modify_ldt_t* inn,
++                              /* OUT */ VexGuestX86SegDescr* out,
++                                        Int oldmode );  // forward
++
++void propagate_thread_area(ThreadId tid, VexGuestArchState *vex)
++{
++   if (vex->guest_GS) {
++      VexGuestX86SegDescr *const sdp = (vex->guest_GS>>3) +
++        ((VexGuestX86SegDescr*)vex->guest_GDT);
++      vki_modify_ldt_t ud;
++      VG_(memset)(&ud, 0, sizeof(ud));
++
++//VG_(printf)("propagate_thread_area sdp=%p  ud=%p\n", sdp, &ud);
++
++      ud.entry_number = -1;
++      ud.base_addr = sdp->LdtEnt.Bits.BaseLow | (sdp->LdtEnt.Bits.BaseMid<<16) |
++        (sdp->LdtEnt.Bits.BaseHi<<24);
++      ud.limit = sdp->LdtEnt.Bits.LimitLow | (sdp->LdtEnt.Bits.LimitHi<<16);
++      ud.seg_32bit = sdp->LdtEnt.Bits.Default_Big;
++      ud.contents = sdp->LdtEnt.Bits.Type >> 2;
++      ud.read_exec_only = 1 ^ (1 & (sdp->LdtEnt.Bits.Type>>1));
++      ud.limit_in_pages = sdp->LdtEnt.Bits.Granularity;
++      ud.seg_not_present = 0;
++      ud.useable = 1;
++//{
++//   VexGuestX86SegDescr out;
++//   translate_to_hw_format(&ud, &out, 0);
++//   VG_(printf)("propagate_thread_area  sdp=[0x%x 0x%x]  out=[0x%x 0x%x]\n",
++//      sdp->LdtEnt.Words.word1,
++//      sdp->LdtEnt.Words.word2,
++//      out.LdtEnt.Words.word1,
++//      out.LdtEnt.Words.word2 );
++//}
++
++      if (0 > set_thread_area(&ud)) {
++         VG_(printf)("propagate_thread_area set_thread_area failed\n");
++      }
++      vex->guest_GS = 3 | (ud.entry_number<<3);
++      //sys_set_thread_area(tid, &ud);
++   }
++}
++
++/* Function letgo_vex_x86_linux is
++ * Copyright 2007 BitWagon Software LLC.  All rights reserved.
++ * Licensed under GNU General Public License, version 2 (GNU GPLv2).
++ */
++
++extern int letgo_vex_x86_linux(VexGuestArchState *vex, ThreadId tid);
++asm(
++".text\n"
++"letgo_vex_x86_linux: .globl letgo_vex_x86_linux\n"
++"	movl 1*4(%esp),%eax\n"  // vex
++"	movl 2*4(%esp),%edx\n"  // tid
++"	pushl %eax; pushl %edx; call propagate_thread_area; addl $2*4,%esp\n"
++
++"	movl 1*4(%esp),%eax\n"  // vex
++"	movl 4*4(%eax),%ecx\n"  // guest_ESP
++"	movl 0x3c(%eax),%edx\n"  // guest_EIP
++"	subl $4*4,%ecx\n"  // push 4 words onto new stack
++"	                       movl %edx,3*4(%ecx)\n"  // guest_EIP
++"	  movl 4*0(%ecx),%edx; movl %edx,2*4(%ecx)\n"  // guest_EAX
++"	  movl 4*1(%ecx),%edx; movl %edx,1*4(%ecx)\n"  // guest_ECX
++"	  movl 4*2(%ecx),%edx; movl %edx,0*4(%ecx)\n"  // guest_EDX
++"	movl %ecx,4*4(%eax)\n"  // guest_ESP after 4 pushes
++"	movl 4*3(%eax),%ebx\n"  // guest_EBX
++"	movl 4*5(%eax),%ebp\n"  // guest_EBP
++"	movl 4*6(%eax),%esi\n"  // guest_ESI
++"	movl 4*7(%eax),%edi\n"  // guest_EDI
++"	movl 4*4(%eax),%esp\n"  // guest_ESP after 4 pushes
++"	addl $4*4,4*4(%eax)\n"  // guest_ESP
++
++"	mov 0x11c(%eax),%edx; testl %edx,%edx; jne 0f\n"  // guest_ES
++"	mov %ds,%edx\n"
++"0:\n"
++"	mov %edx,%es\n"
++
++"	mov 0x11e(%eax),%fs\n"  // guest_FS
++"	mov 0x120(%eax),%gs\n"  // guest_GS
++
++"	pushl %ebx; pushl %esi\n"  // save registers
++"	pushl $126; popl %eax\n"  // __NR_sigprocmask
++"	pushl $2; popl %ebx\n"  // SIG_SETMASK
++"	pushl $2*4; popl %esi\n"  // sizeof(sigset_t)
++"	pushl $0; pushl $0\n"  // sigemptyset
++"	movl %esp,%ecx\n"  // &new
++"	xorl %edx,%edx\n"  // &old (none)
++"	int $0x80\n"  // sigprocmask(SIG_SETMASK, new, NULL)
++"	addl $2*4,%esp\n"  // remove sigset_t
++"	popl %esi; popl %ebx\n"  // restore registers
++
++"	popl %edx; popl %ecx; popl %eax\n"  // guest_EDX, guest_ECX, guest_EAX
++"	ret\n"  // guest_EIP
++);
++
++extern
++Int do_syscall_clone_x86_linux_child_letgo (
++   UInt flags,
++   void *child_stack,
++   int *parent_tidptr,
++   void *newtls,
++   int *child_tidptr
++);
++asm(
++".text\n"
++"do_syscall_clone_x86_linux_child_letgo:\n"
++"        push    %ebx\n"  // XXX 2007-12-07 jreiser  child: use guest_EBX instead
++"        push    %edi\n"
++"        push    %esi\n"
++
++"        movl    0*4+"FSZ"(%esp), %ebx\n"    /* syscall arg1: flags */
++"        movl    1*4+"FSZ"(%esp), %ecx\n"    /* syscall arg2: child stack */
++"        movl    2*4+"FSZ"(%esp), %edx\n"    /* syscall arg3: parent tid * */
++"        movl    3*4+"FSZ"(%esp), %esi\n"    /* syscall arg4: tls_ptr * */
++"        movl    4*4+"FSZ"(%esp), %edi\n"    /* syscall arg5: child tid * */
++"        movl    $"__NR_CLONE", %eax\n"
++"        int     $0x80\n"                   /* clone() */
++"        testl   %eax, %eax\n"              /* child if retval == 0 */
++"        jnz     1f\n"
++
++         /* CHILD - call thread function */
++"        popl    %eax\n"
++"        call    *%eax\n"                   /* call fn */
++
++         /* exit with result */
++"        movl    %eax, %ebx\n"              /* arg1: return value from fn */
++"        movl    $"__NR_EXIT", %eax\n"
++"        int     $0x80\n"
++
++         /* Hm, exit returned */
++"        ud2\n"
++
++"1:\n"   /* PARENT or ERROR */
++"        pop     %esi\n"
++"        pop     %edi\n"
++"        pop     %ebx\n"
++"        ret\n"
++".previous\n"
++);
++
+ #undef FSZ
+ #undef __NR_CLONE
+ #undef __NR_EXIT
+@@ -201,125 +352,132 @@
+    but using the scheduler entrypoint for EIP, and a separate stack
+    for ESP.
+  */
+-static SysRes do_clone ( ThreadId ptid, 
+-                         UInt flags, Addr esp, 
+-                         Int* parent_tidptr, 
+-                         Int* child_tidptr, 
+-                         vki_modify_ldt_t *tlsinfo)
++static SysRes do_clone ( ThreadId const ptid, 
++                         UInt /*const*/ flags, Addr const esp, 
++                         Int* const parent_tidptr, 
++                         Int* const child_tidptr, 
++                         vki_modify_ldt_t *const tlsinfo)
+ {
+    static const Bool debug = False;
+ 
+-   ThreadId     ctid = VG_(alloc_ThreadState)();
+-   ThreadState* ptst = VG_(get_ThreadState)(ptid);
+-   ThreadState* ctst = VG_(get_ThreadState)(ctid);
+-   UWord*       stack;
+-   NSegment const* seg;
++   ThreadState* const ptst = VG_(get_ThreadState)(ptid);
++   ThreadId     ctid = 0;
++   ThreadState* ctst = 0;
++   UWord*       stack = 0;
++   NSegment*    seg;
+    SysRes       res;
+    Int          eax;
+    vki_sigset_t blockall, savedmask;
+ 
++   if (!(VKI_CLONE_CHILD_LETGO & flags)) {
++      ctid = VG_(alloc_ThreadState)();
++      ctst = VG_(get_ThreadState)(ctid);
++   }
++
+    VG_(sigfillset)(&blockall);
+ 
+    vg_assert(VG_(is_running_thread)(ptid));
+-   vg_assert(VG_(is_valid_tid)(ctid));
+ 
+-   stack = (UWord*)ML_(allocstack)(ctid);
+-   if (stack == NULL) {
+-      res = VG_(mk_SysRes_Error)( VKI_ENOMEM );
+-      goto out;
+-   }
+-
+-   /* Copy register state
++   if (!(VKI_CLONE_CHILD_LETGO & flags)) {
++      vg_assert(VG_(is_valid_tid)(ctid));
+ 
+-      Both parent and child return to the same place, and the code
+-      following the clone syscall works out which is which, so we
+-      don't need to worry about it.
+-
+-      The parent gets the child's new tid returned from clone, but the
+-      child gets 0.
++      stack = (UWord*)ML_(allocstack)(ctid);
++      if (stack == NULL) {
++         res = VG_(mk_SysRes_Error)( VKI_ENOMEM );
++         goto out;
++      }
+ 
+-      If the clone call specifies a NULL esp for the new thread, then
+-      it actually gets a copy of the parent's esp.
+-   */
+-   /* Note: the clone call done by the Quadrics Elan3 driver specifies
+-      clone flags of 0xF00, and it seems to rely on the assumption
+-      that the child inherits a copy of the parent's GDT.  
+-      setup_child takes care of setting that up. */
+-   setup_child( &ctst->arch, &ptst->arch, True );
+-
+-   /* Make sys_clone appear to have returned Success(0) in the
+-      child. */
+-   ctst->arch.vex.guest_EAX = 0;
+-
+-   if (esp != 0)
+-      ctst->arch.vex.guest_ESP = esp;
+-
+-   ctst->os_state.parent = ptid;
+-
+-   /* inherit signal mask */
+-   ctst->sig_mask     = ptst->sig_mask;
+-   ctst->tmp_sig_mask = ptst->sig_mask;
+-
+-   /* We don't really know where the client stack is, because its
+-      allocated by the client.  The best we can do is look at the
+-      memory mappings and try to derive some useful information.  We
+-      assume that esp starts near its highest possible value, and can
+-      only go down to the start of the mmaped segment. */
+-   seg = VG_(am_find_nsegment)((Addr)esp);
+-   if (seg && seg->kind != SkResvn) {
+-      ctst->client_stack_highest_word = (Addr)VG_PGROUNDUP(esp);
+-      ctst->client_stack_szB = ctst->client_stack_highest_word - seg->start;
+-
+-      if (debug)
+-	 VG_(printf)("tid %d: guessed client stack range %p-%p\n",
+-		     ctid, seg->start, VG_PGROUNDUP(esp));
+-   } else {
+-      VG_(message)(Vg_UserMsg, "!? New thread %d starts with ESP(%p) unmapped\n",
+-		   ctid, esp);
+-      ctst->client_stack_szB  = 0;
+-   }
+-
+-   /* Assume the clone will succeed, and tell any tool that wants to
+-      know that this thread has come into existence.  We cannot defer
+-      it beyond this point because sys_set_thread_area, just below,
+-      causes tCheck to assert by making references to the new ThreadId
+-      if we don't state the new thread exists prior to that point.
+-      If the clone fails, we'll send out a ll_exit notification for it
+-      at the out: label below, to clean up. */
+-   VG_TRACK ( pre_thread_ll_create, ptid, ctid );
+-
+-   if (flags & VKI_CLONE_SETTLS) {
+-      if (debug)
+-	 VG_(printf)("clone child has SETTLS: tls info at %p: idx=%d "
+-                     "base=%p limit=%x; esp=%p fs=%x gs=%x\n",
+-		     tlsinfo, tlsinfo->entry_number, 
+-                     tlsinfo->base_addr, tlsinfo->limit,
+-		     ptst->arch.vex.guest_ESP,
+-		     ctst->arch.vex.guest_FS, ctst->arch.vex.guest_GS);
+-      res = sys_set_thread_area(ctid, tlsinfo);
+-      if (res.isError)
+-	 goto out;
+-   }
+-
+-   flags &= ~VKI_CLONE_SETTLS;
+-
+-   /* start the thread with everything blocked */
+-   VG_(sigprocmask)(VKI_SIG_SETMASK, &blockall, &savedmask);
+-
+-   /* Create the new thread */
+-   eax = do_syscall_clone_x86_linux(
+-            ML_(start_thread_NORETURN), stack, flags, &VG_(threads)[ctid],
+-            child_tidptr, parent_tidptr, NULL
+-         );
+-   res = VG_(mk_SysRes_x86_linux)( eax );
++      /* Copy register state
++   
++         Both parent and child return to the same place, and the code
++         following the clone syscall works out which is which, so we
++         don't need to worry about it.
++   
++         The parent gets the child's new tid returned from clone, but the
++         child gets 0.
++   
++         If the clone call specifies a NULL esp for the new thread, then
++         it actually gets a copy of the parent's esp.
++      */
++      /* Note: the clone call done by the Quadrics Elan3 driver specifies
++         clone flags of 0xF00, and it seems to rely on the assumption
++         that the child inherits a copy of the parent's GDT.  
++         setup_child takes care of setting that up. */
++      setup_child( &ctst->arch, &ptst->arch, True );
++   
++      /* Make sys_clone appear to have returned Success(0) in the
++         child. */
++      ctst->arch.vex.guest_EAX = 0;
++   
++      if (esp != 0)
++         ctst->arch.vex.guest_ESP = esp;
++   
++      ctst->os_state.parent = ptid;
++   
++      /* inherit signal mask */
++      ctst->sig_mask     = ptst->sig_mask;
++      ctst->tmp_sig_mask = ptst->sig_mask;
++   
++      /* We don't really know where the client stack is, because its
++         allocated by the client.  The best we can do is look at the
++         memory mappings and try to derive some useful information.  We
++         assume that esp starts near its highest possible value, and can
++         only go down to the start of the mmaped segment. */
++      seg = VG_(am_find_nsegment)((Addr)esp);
++      if (seg && seg->kind != SkResvn) {
++         ctst->client_stack_highest_word = (Addr)VG_PGROUNDUP(esp);
++         ctst->client_stack_szB = ctst->client_stack_highest_word - seg->start;
++   
++         if (debug)
++   	 VG_(printf)("tid %d: guessed client stack range %p-%p\n",
++   		     ctid, seg->start, VG_PGROUNDUP(esp));
++      } else {
++         VG_(message)(Vg_UserMsg, "!? New thread %d starts with ESP(%p) unmapped\n",
++   		   ctid, esp);
++         ctst->client_stack_szB  = 0;
++      }
++   
++      if (flags & VKI_CLONE_SETTLS) {
++         if (debug)
++   	 VG_(printf)("clone child has SETTLS: tls info at %p: idx=%d "
++                        "base=%p limit=%x; esp=%p fs=%x gs=%x\n",
++   		     tlsinfo, tlsinfo->entry_number, 
++                        tlsinfo->base_addr, tlsinfo->limit,
++   		     ptst->arch.vex.guest_ESP,
++   		     ctst->arch.vex.guest_FS, ctst->arch.vex.guest_GS);
++         res = sys_set_thread_area(ctid, tlsinfo);
++         if (res.isError)
++   	 goto out;
++      }
++      flags &= ~VKI_CLONE_SETTLS;
+ 
+-   VG_(sigprocmask)(VKI_SIG_SETMASK, &savedmask, NULL);
++      /* start the thread with everything blocked */
++      VG_(sigprocmask)(VKI_SIG_SETMASK, &blockall, &savedmask);
++   
++      /* Create the new thread */
++      eax = do_syscall_clone_x86_linux(
++               ML_(start_thread_NORETURN), stack, flags, &VG_(threads)[ctid],
++               child_tidptr, parent_tidptr, NULL
++            );
++      res = VG_(mk_SysRes_x86_linux)( eax );
++   
++      VG_(sigprocmask)(VKI_SIG_SETMASK, &savedmask, NULL);
++   }
++   else {
++VG_(printf)("do_clone LETGO esp=%p\n", esp);
++      /* Create the new thread */
++      eax = do_syscall_clone_x86_linux_child_letgo(
++         flags &~VKI_CLONE_CHILD_LETGO, (void *)esp, parent_tidptr, tlsinfo, child_tidptr);
++      res = VG_(mk_SysRes_x86_linux)( eax );
++   }
+ 
+   out:
+    if (res.isError) {
+       /* clone failed */
+-      VG_(cleanup_thread)(&ctst->arch);
+-      ctst->status = VgTs_Empty;
++      if (!(VKI_CLONE_CHILD_LETGO & flags)) {
++         VG_(cleanup_thread)(&ctst->arch);
++         ctst->status = VgTs_Empty;
++      }
+       /* oops.  Better tell the tool the thread exited in a hurry :-) */
+       VG_TRACK( pre_thread_ll_exit, ctid );
+    }
+@@ -822,11 +980,24 @@
+    }
+ }
+ 
++extern unsigned get_gs(void);
++__asm__(
++"get_gs: .globl get_gs\n"
++"	mov %gs,%eax\n"
++"	ret\n"
++);
++
++extern void pause(void);
++__asm__(
++"pause: .globl pause\n"
++"0:	pause; jmp 0b\n"
++"	ret\n"
++);
++
+ PRE(sys_clone)
+ {
+    UInt cloneflags;
+ 
+-   PRINT("sys_clone ( %x, %p, %p, %p, %p )",ARG1,ARG2,ARG3,ARG4,ARG5);
+    PRE_REG_READ5(int, "clone",
+                  unsigned long, flags,
+                  void *, child_stack,
+@@ -893,8 +1064,11 @@
+    }
+ 
+    /* Only look at the flags we really care about */
+-   switch (cloneflags & (VKI_CLONE_VM | VKI_CLONE_FS 
++   switch (cloneflags & (VKI_CLONE_VM | VKI_CLONE_FS
+                          | VKI_CLONE_FILES | VKI_CLONE_VFORK)) {
++   case VKI_CLONE_VM                | VKI_CLONE_FILES:
++      /*VG_(message)(Vg_UserMsg, "Warning: clone() without CLONE_FS: 0x%x", ARG1);*/
++      /* fall through */
+    case VKI_CLONE_VM | VKI_CLONE_FS | VKI_CLONE_FILES:
+       /* thread creation */
+       SET_STATUS_from_SysRes(
+@@ -906,14 +1080,20 @@
+                   (vki_modify_ldt_t *)ARG4)); /* set_tls */
+       break;
+ 
++   case VKI_CLONE_FILES:  /* note no CLONE_VM, ==> fork */
++      /*VG_(message)(Vg_UserMsg, "Warning: fork clone() without CLONE_FS: 0x%x", ARG1);*/
++      goto do_fork;
++
+    case VKI_CLONE_VFORK | VKI_CLONE_VM: /* vfork */
+       /* FALLTHROUGH - assume vfork == fork */
+       cloneflags &= ~(VKI_CLONE_VFORK | VKI_CLONE_VM);
+ 
++do_fork:
+    case 0: /* plain fork */
+       SET_STATUS_from_SysRes(
+          ML_(do_fork_clone)(tid,
+                        cloneflags,      /* flags */
++                       (Addr)ARG2,      /* child ESP */
+                        (Int *)ARG3,     /* parent_tidptr */
+                        (Int *)ARG5));   /* child_tidptr */
+       break;
+@@ -1342,8 +1522,6 @@
+    // pagesize or 4K-size units in offset?  For ppc32/64-linux, this is
+    // 4K-sized.  Assert that the page size is 4K here for safety.
+    vg_assert(VKI_PAGE_SIZE == 4096);
+-   PRINT("sys_mmap2 ( %p, %llu, %d, %d, %d, %d )",
+-         ARG1, (ULong)ARG2, ARG3, ARG4, ARG5, ARG6 );
+    PRE_REG_READ6(long, "mmap2",
+                  unsigned long, start, unsigned long, length,
+                  unsigned long, prot,  unsigned long, flags,
+diff -ur valgrind-3.3.0.old/coregrind/pub_core_stacks.h valgrind-3.3.0.new/coregrind/pub_core_stacks.h
+--- valgrind-3.3.0.old/coregrind/pub_core_stacks.h	2007-12-10 15:18:46.000000000 -0800
++++ valgrind-3.3.0.new/coregrind/pub_core_stacks.h	2007-12-20 17:30:51.000000000 -0800
+@@ -38,7 +38,9 @@
+ 
+ extern UWord VG_(register_stack)   ( Addr start, Addr end );
+ extern void  VG_(deregister_stack) ( UWord id );
++extern void  VG_(deregaddr_stack) ( Addr addr );
+ extern void  VG_(change_stack)     ( UWord id, Addr start, Addr end );
++extern Addr  VG_(switch_stack)     ( Addr old_sp, Addr new_sp );
+ 
+ extern VG_REGPARM(2)
+        void  VG_(unknown_SP_update) ( Addr old_SP, Addr new_SP );
+diff -ur valgrind-3.3.0.old/memcheck/mc_leakcheck.c valgrind-3.3.0.new/memcheck/mc_leakcheck.c
+--- valgrind-3.3.0.old/memcheck/mc_leakcheck.c	2007-12-10 15:18:22.000000000 -0800
++++ valgrind-3.3.0.new/memcheck/mc_leakcheck.c	2007-12-17 14:59:09.000000000 -0800
+@@ -693,9 +693,19 @@
+    }
+ 
+    /* Sanity check -- make sure they don't overlap */
++   int n_violations = 0;
+    for (i = 0; i < lc_n_shadows-1; i++) {
+-      tl_assert( lc_shadows[i]->data + lc_shadows[i]->szB
+-                 <= lc_shadows[i+1]->data );
++      if (!(lc_shadows[i]->data + lc_shadows[i]->szB
++                 <= lc_shadows[i+1]->data )) {
++         VG_(message)(Vg_UserMsg, "do_detect_memory_leaks [%p, +0x%x) [%p +0x%x)\n",
++            lc_shadows[   i]->data, lc_shadows[   i]->szB,
++            lc_shadows[1+ i]->data, lc_shadows[1+ i]->szB);
++         ++n_violations;
++      }
++      if (20 < n_violations) {
++         tl_assert( lc_shadows[i]->data + lc_shadows[i]->szB
++                    <= lc_shadows[i+1]->data );
++      }
+    }
+ 
+    if (lc_n_shadows == 0) {
+diff -ur valgrind-3.3.0.old/memcheck/mc_main.c valgrind-3.3.0.new/memcheck/mc_main.c
+--- valgrind-3.3.0.old/memcheck/mc_main.c	2007-12-10 15:18:22.000000000 -0800
++++ valgrind-3.3.0.new/memcheck/mc_main.c	2007-12-26 16:11:14.000000000 -0800
+@@ -30,6 +30,11 @@
+    The GNU General Public License is contained in the file COPYING.
+ */
+ 
++/* The changes for "--complain-asap=yes" and LoadUninit are
++ * Copyright 2007 BitWagon Software LLC.  All rights reserved.
++ * Licensed under GNU General Public License, verion 2 (GNU GPLv2).
++ */
++
+ #include "pub_tool_basics.h"
+ #include "pub_tool_aspacemgr.h"
+ #include "pub_tool_hashtable.h"     // For mc_include.h
+@@ -666,12 +671,22 @@
+    }
+ }
+ 
++unsigned n_blip;
++
+ /* --------------- Fundamental functions --------------- */
++void blip(Addr a, unsigned bits, int which)
++{
++   ++n_blip;
++//   VG_(printf)("BOGEY 0x%lx  bits=%x  which=%d\n", a, bits, which);
++}
++
++Addr bogey = ~0u;
+ 
+ static INLINE
+ void insert_vabits2_into_vabits8 ( Addr a, UChar vabits2, UChar* vabits8 )
+ {
+    UInt shift =  (a & 3)  << 1;        // shift by 0, 2, 4, or 6
++   if (a==bogey) blip(a, vabits2, 1);
+    *vabits8  &= ~(0x3     << shift);   // mask out the two old bits
+    *vabits8  |=  (vabits2 << shift);   // mask  in the two new bits
+ }
+@@ -680,6 +695,7 @@
+ void insert_vabits4_into_vabits8 ( Addr a, UChar vabits4, UChar* vabits8 )
+ {
+    UInt shift;
++   if ((unsigned long)(bogey - a) < 2ul) blip(a, vabits4, 2);
+    tl_assert(VG_IS_2_ALIGNED(a));      // Must be 2-aligned
+    shift     =  (a & 2)   << 1;        // shift by 0 or 4
+    *vabits8 &= ~(0xf      << shift);   // mask out the four old bits
+@@ -747,6 +763,7 @@
+ {
+    SecMap* sm       = get_secmap_for_writing(a);
+    UWord   sm_off   = SM_OFF(a);
++   if ((unsigned long)(bogey - a) < 4ul) blip(a, vabits8, 3);
+    sm->vabits8[sm_off] = vabits8;
+ }
+ 
+@@ -761,6 +778,7 @@
+ {
+    Bool  ok      = True;
+    UChar vabits2 = get_vabits2(a);
++   if ((unsigned long)(bogey - a) < 2ul) blip(a, vbits8, 4);
+    if ( VA_BITS2_NOACCESS != vabits2 ) {
+       // Addressable.  Convert in-register format to in-memory format.
+       // Also remove any existing sec V bit entry for the byte if no
+@@ -1135,6 +1153,7 @@
+ 
+ /* --------------- Load/store slow cases. --------------- */
+ 
++Int           MC_(clo_complain_asap)          = False;
+ // Forward declarations
+ static void mc_record_address_error  ( ThreadId tid, Addr a,
+                                        Int size, Bool isWrite );
+@@ -1143,6 +1162,7 @@
+ static void mc_record_memparam_error ( ThreadId tid, Addr a,
+                                        Bool isAddrErr, Char* msg );
+ static void mc_record_jump_error     ( ThreadId tid, Addr a );
++static void mc_record_loaduninit_error (Addr a, Int size);
+ 
+ static
+ #ifndef PERF_FAST_LOADV
+@@ -1155,12 +1175,13 @@
+       the bytes in the word, from the most significant down to the
+       least. */
+    ULong vbits64     = V_BITS64_UNDEFINED;
+-   SizeT szB         = nBits / 8;
++   SizeT const szB   = nBits / 8;
+    SSizeT i          = szB-1;    // Must be signed
+    SizeT n_addrs_bad = 0;
+    Addr  ai;
+    Bool  partial_load_exemption_applies;
+    UChar vbits8;
++   UChar vbsum;
+    Bool  ok;
+ 
+    PROF_EVENT(30, "mc_LOADVn_slow");
+@@ -1180,8 +1201,11 @@
+       UWord   vabits16 = ((UShort*)(sm->vabits8))[sm_off16];
+       if (EXPECTED_TAKEN(vabits16 == VA_BITS16_DEFINED))
+          return V_BITS64_DEFINED;
+-      if (EXPECTED_TAKEN(vabits16 == VA_BITS16_UNDEFINED))
++      if (EXPECTED_TAKEN(vabits16 == VA_BITS16_UNDEFINED)) {
++         if (MC_(clo_complain_asap))
++            mc_record_loaduninit_error(a, 8);
+          return V_BITS64_UNDEFINED;
++      }
+       /* else fall into the slow case */
+    }
+    if (EXPECTED_TAKEN(sizeof(void*) == 8 
+@@ -1191,19 +1215,24 @@
+       UWord vabits8 = sm->vabits8[sm_off];
+       if (EXPECTED_TAKEN(vabits8 == VA_BITS8_DEFINED))
+          return ((UWord)0xFFFFFFFF00000000ULL | (UWord)V_BITS32_DEFINED);
+-      if (EXPECTED_TAKEN(vabits8 == VA_BITS8_UNDEFINED))
++      if (EXPECTED_TAKEN(vabits8 == VA_BITS8_UNDEFINED)) {
++         if (MC_(clo_complain_asap))
++            mc_record_loaduninit_error(a, 4);
+          return ((UWord)0xFFFFFFFF00000000ULL | (UWord)V_BITS32_UNDEFINED);
++      }
+       /* else fall into slow case */
+    }
+    /* ------------ END semi-fast cases ------------ */
+ 
+    tl_assert(nBits == 64 || nBits == 32 || nBits == 16 || nBits == 8);
+ 
++   vbsum = 0;
+    for (i = szB-1; i >= 0; i--) {
+       PROF_EVENT(31, "mc_LOADVn_slow(loop)");
+       ai = a + byte_offset_w(szB, bigendian, i);
+       ok = get_vbits8(ai, &vbits8);
+       if (!ok) n_addrs_bad++;
++      vbsum   |= vbits8;
+       vbits64 <<= 8; 
+       vbits64 |= vbits8;
+    }
+@@ -1229,6 +1258,8 @@
+    if (n_addrs_bad > 0 && !partial_load_exemption_applies)
+       mc_record_address_error( VG_(get_running_tid)(), a, szB, False );
+ 
++   if (vbsum && MC_(clo_complain_asap))
++      mc_record_loaduninit_error(a, szB);
+    return vbits64;
+ }
+ 
+@@ -1336,7 +1367,11 @@
+    SecMap*  example_dsm;
+ 
+    PROF_EVENT(150, "set_address_range_perms");
++   if (0x20000 <= lenT)  {
++      VG_(printf)("set_address_range_perms  [0x%lx, +0x%lx) %x\n", a, lenT, vabits16);
++   }
+ 
++   if ((unsigned long)(bogey - a) < lenT) blip(a, vabits16, 5);
+    /* Check the V+A bits make sense. */
+    tl_assert(VA_BITS16_NOACCESS  == vabits16 ||
+              VA_BITS16_UNDEFINED == vabits16 ||
+@@ -1356,7 +1391,7 @@
+          if (vabits16 == VA_BITS16_UNDEFINED) s = "undefined";
+          if (vabits16 == VA_BITS16_DEFINED  ) s = "defined";
+          VG_(message)(Vg_UserMsg, "Warning: set address range perms: "
+-                                  "large range %lu (%s)", lenT, s);
++                                  "large range [0x%lx, +0x%lx) (%s)", a, lenT, s);
+       }
+    }
+ 
+@@ -1569,10 +1604,19 @@
+    set_address_range_perms ( a, len, VA_BITS16_UNDEFINED, SM_DIST_UNDEFINED );
+ }
+ 
++static struct MMD_history {
++   Addr a;
++   SizeT len;
++} mmd_history[1024];
++static unsigned mmd_ndx = 0;
++
+ void MC_(make_mem_defined) ( Addr a, SizeT len )
+ {
+    PROF_EVENT(42, "MC_(make_mem_defined)");
+    DEBUG("MC_(make_mem_defined)(%p, %lu)\n", a, len);
++mmd_history[mmd_ndx].a = a;
++mmd_history[mmd_ndx].len = len;
++mmd_ndx = (1+ mmd_ndx) &~ -1024;
+    set_address_range_perms ( a, len, VA_BITS16_DEFINED, SM_DIST_DEFINED );
+ }
+ 
+@@ -1609,6 +1653,7 @@
+    if (len == 0 || src == dst)
+       return;
+ 
++   if ((unsigned long)(bogey - dst) < len) blip(dst, 0x9999, 6);
+    aligned   = VG_IS_4_ALIGNED(src) && VG_IS_4_ALIGNED(dst);
+    nooverlap = src+len <= dst || dst+len <= src;
+ 
+@@ -1688,6 +1733,7 @@
+ 
+    PROF_EVENT(300, "make_aligned_word32_undefined");
+ 
++   if ((unsigned long)(bogey - a) < 4ul) blip(a, VA_BITS8_UNDEFINED, 7);
+ #ifndef PERF_FAST_STACK2
+    MC_(make_mem_undefined)(a, 4);
+ #else
+@@ -1712,6 +1758,7 @@
+ 
+    PROF_EVENT(310, "make_aligned_word32_noaccess");
+ 
++   if ((unsigned long)(bogey - a) < 4ul) blip(a, VA_BITS8_NOACCESS, 8);
+ #ifndef PERF_FAST_STACK2
+    MC_(make_mem_noaccess)(a, 4);
+ #else
+@@ -1737,6 +1784,7 @@
+ 
+    PROF_EVENT(320, "make_aligned_word64_undefined");
+ 
++   if ((unsigned long)(bogey - a) < 8ul) blip(a, VA_BITS16_UNDEFINED, 9);
+ #ifndef PERF_FAST_STACK2
+    MC_(make_mem_undefined)(a, 8);
+ #else
+@@ -1761,6 +1809,7 @@
+ 
+    PROF_EVENT(330, "make_aligned_word64_noaccess");
+ 
++   if ((unsigned long)(bogey - a) < 8ul) blip(a, VA_BITS16_NOACCESS, 10);
+ #ifndef PERF_FAST_STACK2
+    MC_(make_mem_noaccess)(a, 8);
+ #else
+@@ -2194,6 +2243,7 @@
+ */
+ void MC_(helperc_MAKE_STACK_UNINIT) ( Addr base, UWord len )
+ {
++   if ((unsigned long)(bogey - base) < len) blip(base, VA_BITS16_UNDEFINED, 11);
+    tl_assert(sizeof(UWord) == sizeof(SizeT));
+    if (0)
+       VG_(printf)("helperc_MAKE_STACK_UNINIT %p %lu\n", base, len );
+@@ -2681,6 +2731,7 @@
+       Err_Overlap,
+       Err_Leak,
+       Err_IllegalMempool,
++      Err_LoadUninit,
+    }
+    MC_ErrorTag;
+ 
+@@ -2769,6 +2820,12 @@
+          AddrInfo ai;
+       } IllegalMempool;
+ 
++      // Fetch of uninitialized bits.
++      struct {
++         AddrInfo ai;
++         Int szB;  // Size in bytes
++      } LoadUninit;
++
+    } Err;
+ };
+ 
+@@ -2898,12 +2955,14 @@
+          mc_pp_msg("UninitValue", err,
+                    "Use of uninitialised value of size %d",
+                    extra->Err.Value.szB);
++//for(;;);
+          break;
+ 
+       case Err_Cond:
+          mc_pp_msg("UninitCondition", err,
+                    "Conditional jump or move depends"
+                    " on uninitialised value(s)");
++//for(;;);
+          break;
+ 
+       case Err_RegParam:
+@@ -2922,6 +2981,13 @@
+                         &extra->Err.MemParam.ai, False);
+          break;
+ 
++      case Err_LoadUninit:
++         mc_pp_msg("LoadUninit", err, "load of uninit bits in %d bytes",
++            extra->Err.LoadUninit.szB);
++         mc_pp_AddrInfo(VG_(get_error_address)(err), &extra->Err.LoadUninit.ai,
++                        False);
++         break;
++
+       case Err_User:
+          mc_pp_msg("ClientCheck", err,
+                    "%s byte(s) found during client check request", 
+@@ -2936,6 +3002,7 @@
+                    "Invalid free() / delete / delete[]");
+          mc_pp_AddrInfo(VG_(get_error_address)(err),
+                         &extra->Err.Free.ai, False);
++for(;;);
+          break;
+ 
+       case Err_FreeMismatch:
+@@ -2954,6 +3021,8 @@
+             mc_pp_msg("InvalidRead", err,
+                       "Invalid read of size %d", 
+                       extra->Err.Addr.szB); 
++            mc_pp_AddrInfo(VG_(get_error_address)(err), &extra->Err.Addr.ai,
++                           extra->Err.Addr.maybe_gcc);
+          }
+          mc_pp_AddrInfo(VG_(get_error_address)(err), &extra->Err.Addr.ai,
+                         extra->Err.Addr.maybe_gcc);
+@@ -3233,6 +3302,14 @@
+    VG_(maybe_record_error)( tid, Err_User, a, /*s*/NULL, &extra );
+ }
+ 
++static void mc_record_loaduninit_error(Addr a, Int szB)
++{
++   MC_Error extra;
++   extra.Err.LoadUninit.ai.tag = Addr_Undescribed;
++   extra.Err.LoadUninit.szB = szB;
++   VG_(maybe_record_error)( VG_(get_running_tid)(), Err_LoadUninit, a, NULL, &extra );
++}
++
+ /*------------------------------------------------------------*/
+ /*--- Other error operations                               ---*/
+ /*------------------------------------------------------------*/
+@@ -3281,6 +3358,7 @@
+       case Err_IllegalMempool:
+       case Err_Overlap:
+       case Err_Cond:
++      case Err_LoadUninit:
+          return True;
+ 
+       case Err_Addr:
+@@ -3413,6 +3491,10 @@
+       describe_addr ( VG_(get_error_address)(err),
+                       &extra->Err.IllegalMempool.ai );
+       return sizeof(MC_Error);
++   case Err_LoadUninit:
++      describe_addr ( VG_(get_error_address)(err), &extra->Err.LoadUninit.ai );
++      return sizeof(MC_Error);
++
+ 
+    // Err_FreeMismatches have already had their address described;  this is
+    // possible because we have the MC_Chunk on hand when the error is
+@@ -3454,6 +3536,10 @@
+       OverlapSupp,   // Overlapping blocks in memcpy(), strcpy(), etc
+       LeakSupp,      // Something to be suppressed in a leak check.
+       MempoolSupp,   // Memory pool suppression.
++
++      // Load uninitilaized bits from given size
++      Load1Supp, Load2Supp, Load4Supp, Load8Supp, Load16Supp,
++
+    } 
+    MC_SuppKind;
+ 
+@@ -3481,6 +3567,11 @@
+    else if (VG_STREQ(name, "Value4"))  skind = Value4Supp;
+    else if (VG_STREQ(name, "Value8"))  skind = Value8Supp;
+    else if (VG_STREQ(name, "Value16")) skind = Value16Supp;
++   else if (VG_STREQ(name, "Load1"))   skind = Load1Supp;
++   else if (VG_STREQ(name, "Load2"))   skind = Load2Supp;
++   else if (VG_STREQ(name, "Load4"))   skind = Load4Supp;
++   else if (VG_STREQ(name, "Load8"))   skind = Load8Supp;
++   else if (VG_STREQ(name, "Load16"))  skind = Load16Supp;
+    else 
+       return False;
+ 
+@@ -3540,6 +3631,14 @@
+       addr_case:
+          return (ekind == Err_Addr && extra->Err.Addr.szB == su_szB);
+ 
++      case Load1Supp: su_szB = 1; goto load_case;
++      case Load2Supp: su_szB = 2; goto load_case;
++      case Load4Supp: su_szB = 4; goto load_case;
++      case Load8Supp: su_szB = 8; goto load_case;
++      case Load16Supp:su_szB =16; goto load_case;
++      load_case:
++         return (ekind == Err_LoadUninit && extra->Err.LoadUninit.szB == su_szB);
++
+       case JumpSupp:
+          return (ekind == Err_Jump);
+ 
+@@ -3662,7 +3761,10 @@
+    // Convert V bits from compact memory form to expanded register form.
+    if (EXPECTED_TAKEN(vabits16 == VA_BITS16_DEFINED)) {
+       return V_BITS64_DEFINED;
+-   } else if (EXPECTED_TAKEN(vabits16 == VA_BITS16_UNDEFINED)) {
++   }
++   if (MC_(clo_complain_asap))
++      mc_record_loaduninit_error(a, 8);
++   if (EXPECTED_TAKEN(vabits16 == VA_BITS16_UNDEFINED)) {
+       return V_BITS64_UNDEFINED;
+    } else {
+       /* Slow case: the 8 bytes are not all-defined or all-undefined. */
+@@ -3768,7 +3870,10 @@
+    // Almost certainly not necessary, but be paranoid.
+    if (EXPECTED_TAKEN(vabits8 == VA_BITS8_DEFINED)) {
+       return ((UWord)0xFFFFFFFF00000000ULL | (UWord)V_BITS32_DEFINED);
+-   } else if (EXPECTED_TAKEN(vabits8 == VA_BITS8_UNDEFINED)) {
++   }
++   if (MC_(clo_complain_asap))
++      mc_record_loaduninit_error(a, 4);
++   if (EXPECTED_TAKEN(vabits8 == VA_BITS8_UNDEFINED)) {
+       return ((UWord)0xFFFFFFFF00000000ULL | (UWord)V_BITS32_UNDEFINED);
+    } else {
+       /* Slow case: the 4 bytes are not all-defined or all-undefined. */
+@@ -3902,13 +4007,19 @@
+    // addressible.
+    // Convert V bits from compact memory form to expanded register form
+    if      (vabits8 == VA_BITS8_DEFINED  ) { return V_BITS16_DEFINED;   }
+-   else if (vabits8 == VA_BITS8_UNDEFINED) { return V_BITS16_UNDEFINED; }
++   else if (vabits8 == VA_BITS8_UNDEFINED) {
++      if (MC_(clo_complain_asap))
++         mc_record_loaduninit_error(a, 2);
++      return V_BITS16_UNDEFINED;
++   }
+    else {
+       // The 4 (yes, 4) bytes are not all-defined or all-undefined, check
+       // the two sub-bytes.
+       UChar vabits4 = extract_vabits4_from_vabits8(a, vabits8);
+       if      (vabits4 == VA_BITS4_DEFINED  ) { return V_BITS16_DEFINED;   }
+-      else if (vabits4 == VA_BITS4_UNDEFINED) { return V_BITS16_UNDEFINED; }
++      if (MC_(clo_complain_asap))
++         mc_record_loaduninit_error(a, 2);
++      if (vabits4 == VA_BITS4_UNDEFINED) { return V_BITS16_UNDEFINED; }
+       else {
+          /* Slow case: the two bytes are not all-defined or all-undefined. */
+          PROF_EVENT(242, "mc_LOADV16-slow2");
+@@ -4010,13 +4121,19 @@
+    // Handle common case quickly: a is mapped, and the entire
+    // word32 it lives in is addressible.
+    if      (vabits8 == VA_BITS8_DEFINED  ) { return V_BITS8_DEFINED;   }
+-   else if (vabits8 == VA_BITS8_UNDEFINED) { return V_BITS8_UNDEFINED; }
++   else if (vabits8 == VA_BITS8_UNDEFINED) {
++      if (MC_(clo_complain_asap))
++         mc_record_loaduninit_error(a, 1);
++      return V_BITS8_UNDEFINED;
++   }
+    else {
+       // The 4 (yes, 4) bytes are not all-defined or all-undefined, check
+       // the single byte.
+       UChar vabits2 = extract_vabits2_from_vabits8(a, vabits8);
+       if      (vabits2 == VA_BITS2_DEFINED  ) { return V_BITS8_DEFINED;   }
+-      else if (vabits2 == VA_BITS2_UNDEFINED) { return V_BITS8_UNDEFINED; }
++      if (MC_(clo_complain_asap))
++         mc_record_loaduninit_error(a, 1);
++      if (vabits2 == VA_BITS2_UNDEFINED) { return V_BITS8_UNDEFINED; }
+       else {
+          /* Slow case: the byte is not all-defined or all-undefined. */
+          PROF_EVENT(262, "mc_LOADV8-slow2");
+@@ -4379,6 +4496,7 @@
+ static Bool mc_process_cmd_line_options(Char* arg)
+ {
+ 	VG_BOOL_CLO(arg, "--partial-loads-ok",      MC_(clo_partial_loads_ok))
++   else VG_BOOL_CLO(arg, "--complain-asap",         MC_(clo_complain_asap))
+    else VG_BOOL_CLO(arg, "--show-reachable",        MC_(clo_show_reachable))
+    else VG_BOOL_CLO(arg, "--workaround-gcc296-bugs",MC_(clo_workaround_gcc296_bugs))
+ 
+@@ -4597,6 +4715,40 @@
+    return False;
+ }
+ 
++#include "../coregrind/pub_core_basics.h"
++# define __user
++typedef unsigned vki_size_t;
++typedef struct vki_sigaltstack {
++	void __user *ss_sp;
++	int ss_flags;
++	vki_size_t ss_size;
++} vki_stack_t;
++typedef struct {
++	unsigned long sig[2];
++} vki_sigset_t;
++#include "../coregrind/pub_core_threadstate.h"
++
++static unsigned like_count;
++static unsigned like_lobound = 0;
++
++#define N_LIKE_COUNT 0x8000
++struct Like_buf {
++   void *addr;
++   void *pc;
++} like_buf[N_LIKE_COUNT];
++
++int bogey_ndx = 0;
++void *bogey_buf[0x400];
++
++static void find_like(void *addr)
++{
++	int j;
++	for (j=0; j < N_LIKE_COUNT; ++j)
++	if (0==(~1 & ((unsigned)like_buf[j].addr ^ (unsigned)addr))) {
++		VG_(printf)("find_like %d %p\n", j, &like_buf[j]);
++	}
++}
++
+ static Bool mc_handle_client_request ( ThreadId tid, UWord* arg, UWord* ret )
+ {
+    Int   i;
+@@ -4660,6 +4812,11 @@
+          *ret = -1;
+          break;
+ 
++      case VG_USERREQ__SET_BOGEY:
++         bogey = arg[1];
++         bogey_buf[0x3ff & bogey_ndx++] = (void *)arg[1];
++         break;
++
+       case VG_USERREQ__CREATE_BLOCK: /* describe a block */
+          if (arg[1] != 0 && arg[2] != 0) {
+             i = alloc_client_block();
+@@ -4718,6 +4875,21 @@
+          UInt rzB       =       arg[3];
+          Bool is_zeroed = (Bool)arg[4];
+ 
++         if ((void *)(1|p)==like_buf[(N_LIKE_COUNT -1) & like_count].addr) {
++            VG_(message)(Vg_UserMsg, "trivial dup MALLOCLIKE [%p, +%u]  pc=%p  pc=%p\n",
++               p, sizeB, like_buf[(N_LIKE_COUNT -1) & like_count].pc, VG_(get_ThreadState)(tid)->arch.vex.guest_EIP);
++for(;;);
++         }
++         if (VG_(HT_lookup)(MC_(malloc_list), p)) {
++            VG_(message)(Vg_UserMsg, "dup MALLOCLIKE [%p, +%u]  pc=%p\n",
++               p, sizeB, VG_(get_ThreadState)(tid)->arch.vex.guest_EIP);
++if (p) for(;;);
++         }
++         ++like_count;
++         like_buf[(N_LIKE_COUNT -1) & like_count].addr = (void *)(1|p);
++         like_buf[(N_LIKE_COUNT -1) & like_count].pc   = (void *)VG_(get_ThreadState)(tid)->arch.vex.guest_EIP;
++//if (like_lobound < like_count) VG_(printf)("MALLOCLIKE %p 0x%lx %d  pc=%p\n",
++//   p, sizeB, is_zeroed, VG_(get_ThreadState)(tid)->arch.vex.guest_EIP);
+          MC_(new_block) ( tid, p, sizeB, /*ignored*/0, rzB, is_zeroed, 
+                           MC_AllocCustom, MC_(malloc_list) );
+          return True;
+@@ -4726,6 +4898,11 @@
+          Addr p         = (Addr)arg[1];
+          UInt rzB       =       arg[2];
+ 
++         ++like_count;
++         like_buf[(N_LIKE_COUNT -1) & like_count].addr = (void *)p;
++         like_buf[(N_LIKE_COUNT -1) & like_count].pc   = (void *)VG_(get_ThreadState)(tid)->arch.vex.guest_EIP;
++//if (like_lobound < like_count) VG_(printf)("  FREELIKE %p 0x%lx  pc=%p\n",
++//   p, rzB, VG_(get_ThreadState)(tid)->arch.vex.guest_EIP);
+          MC_(handle_free) ( tid, p, rzB, MC_AllocCustom );
+          return True;
+       }
+diff -ur valgrind-3.3.0.old/memcheck/mc_malloc_wrappers.c valgrind-3.3.0.new/memcheck/mc_malloc_wrappers.c
+--- valgrind-3.3.0.old/memcheck/mc_malloc_wrappers.c	2007-12-10 15:18:22.000000000 -0800
++++ valgrind-3.3.0.new/memcheck/mc_malloc_wrappers.c	2007-12-18 13:21:46.000000000 -0800
+@@ -273,6 +273,9 @@
+    }
+ }
+ 
++extern void blip(Addr a);
++extern Addr bogey;
++
+ static
+ void die_and_free_mem ( ThreadId tid, MC_Chunk* mc, SizeT rzB )
+ {
+@@ -280,6 +283,9 @@
+       tl_assert(MC_(clo_free_fill) >= 0x00 && MC_(clo_free_fill) <= 0xFF);
+       VG_(memset)((void*)mc->data, MC_(clo_free_fill), mc->szB);
+    }
++   if ((bogey - mc->data) < (unsigned)mc->szB) {
++      blip(mc->data);
++   }
+ 
+    /* Note: make redzones noaccess again -- just in case user made them
+       accessible with a client request... */
+diff -ur valgrind-3.3.0.old/memcheck/memcheck.h valgrind-3.3.0.new/memcheck/memcheck.h
+--- valgrind-3.3.0.old/memcheck/memcheck.h	2007-12-10 15:18:22.000000000 -0800
++++ valgrind-3.3.0.new/memcheck/memcheck.h	2007-12-18 11:44:18.000000000 -0800
+@@ -93,6 +93,8 @@
+ 
+       VG_USERREQ__MAKE_MEM_DEFINED_IF_ADDRESSABLE,
+ 
++      VG_USERREQ__SET_BOGEY,
++
+       /* This is just for memcheck's internal use - don't use it */
+       _VG_USERREQ__MEMCHECK_RECORD_OVERLAP_ERROR 
+          = VG_USERREQ_TOOL_BASE('M','C') + 256
+@@ -142,6 +144,14 @@
+     _qzz_res;                                                    \
+    }))
+ 
++#define VALGRIND_SET_BOGEY(_qzz_addr) \
++   (__extension__({unsigned int _qzz_res;                        \
++    VALGRIND_DO_CLIENT_REQUEST(_qzz_res, 0 /* default return */, \
++                            VG_USERREQ__SET_BOGEY, \
++                            _qzz_addr, 0, 0, 0, 0);       \
++    _qzz_res;                                                    \
++   }))
++
+ /* Create a block-description handle.  The description is an ascii
+    string which is included in any messages pertaining to addresses
+    within the specified memory range.  Has no other effect on the

@@ -1,0 +1,12 @@
+--- valgrind-3.3.0/coregrind/m_syswrap/syswrap-x86-linux.c	2015-08-25 18:17:47.000000000 -0400
++++ valgrind-3.3.0-new/coregrind/m_syswrap/syswrap-x86-linux.c	2015-08-25 18:28:49.000000000 -0400
+@@ -437,6 +437,8 @@
+          ctst->client_stack_szB  = 0;
+       }
+    
++      VG_TRACK ( pre_thread_ll_create, ptid, ctid );
++
+       if (flags & VKI_CLONE_SETTLS) {
+          if (debug)
+    	 VG_(printf)("clone child has SETTLS: tls info at %p: idx=%d "
+Only in /home/ruigu/Desktop/NewWorld/valgrind-3 (copy).3.0/coregrind/m_syswrap: syswrap-x86-linux.c~
