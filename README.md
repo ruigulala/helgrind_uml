@@ -1,4 +1,4 @@
-# Valgrind_uml
+# Helgrind_uml
 Apply helgrind on UML
 
 ## Environment
