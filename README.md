@@ -2,12 +2,15 @@
 Apply helgrind on UML
 
 ## Environment
-We tested our work on Ubuntu 7.10 (kernel version 2.6.22.5, same as UML).
+We tested our work on Ubuntu 7.10 (kernel version 2.6.22.5, same as UML). We recommend using VMVare for virtual machine manager.
+Columbia Student can obtain free VMVare from 
+https://e5.onthehub.com/WebStore/ProductsByMajorVersionList.aspx?cmi_mnuMain_child_child=6130e417-ad1a-e511-940d-b8ca3a5db7a1&cmi_mnuMain_child=aafc5891-884f-e511-940f-b8ca3a5db7a1&ws=76ead48e-b423-de11-a497-0030485a8df0&vsro=8
 
+So, download VMVare and Ubuntu 7.10(32-bit) version and then move to the following steps.
 
 ## Download && Extract
 
-Download all required directories and files from our repository, including:
+Checkout all the required directories and files from our repository, including:
 - uml/linux-2.6.22.5: linux kernel codes in version 2.6.22.5
 - valgrind-3.3.0: valgrind source codes in version 3.3.0
 - po37258-linux-2.6.22.5.patch: patch on UML
