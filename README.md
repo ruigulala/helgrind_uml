@@ -39,7 +39,7 @@ For Slackware-12.2-root_fs.bz2, run:
     
     > patch -p1 < ../po37258-valgrind-3.3.0.patch
 
-	> patch -p1 < ../../extra_patch_on_valgrind.patch
+	> patch -p1 < ../extra_patch_on_valgrind.patch
 
 
 ## Configure && Compile
